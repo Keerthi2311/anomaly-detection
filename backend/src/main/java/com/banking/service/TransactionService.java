@@ -2,7 +2,6 @@ package com.banking.service;
 
 import com.banking.entity.Transaction;
 import com.banking.repository.TransactionRepository;
-import com.banking.service.AccountService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import java.math.BigDecimal;

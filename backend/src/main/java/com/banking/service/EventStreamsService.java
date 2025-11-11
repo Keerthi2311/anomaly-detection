@@ -3,25 +3,36 @@ package com.banking.service;
 import com.banking.entity.LoginFeatures;
 import com.banking.entity.MFAFeatures;
 import com.banking.entity.Transaction;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import java.util.Base64;
 import org.springframework.web.client.RestTemplate;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Logger;
 
 @Service
 public class EventStreamsService {
 
+    private static final Logger logger = Logger.getLogger(EventStreamsService.class.getName());
+    private final ObjectMapper mapper = new ObjectMapper();
+
     private final RestTemplate restTemplate;
     private final LoginFeaturesService loginFeaturesService;
     private final MFAFeaturesService mfaFeaturesService;
+    private final FeaturePreparationService featurePreparationService;
+
+    @Autowired
+    private KafkaTemplate<String, String> kafkaTemplate;
 
     @Value("${eventstreams.enabled:false}")
     private boolean enabled;
@@ -44,14 +55,22 @@ public class EventStreamsService {
     @Value("${eventstreams.password:}")
     private String password;
 
+    @Value("${event.streams.topic.anomaly:anomalies}")
+    private String anomalyTopic;
+
+    @Value("${event.streams.topic.success:successes}")
+    private String successTopic;
+
     public EventStreamsService(
         @Qualifier("eventStreamsRestTemplate") RestTemplate restTemplate,
         LoginFeaturesService loginFeaturesService,
-        MFAFeaturesService mfaFeaturesService
+        MFAFeaturesService mfaFeaturesService,
+        FeaturePreparationService featurePreparationService
     ) {
         this.restTemplate = restTemplate;
         this.loginFeaturesService = loginFeaturesService;
         this.mfaFeaturesService = mfaFeaturesService;
+        this.featurePreparationService = featurePreparationService;
     }
 
     public void sendTransactionDetails(Transaction tx) {
@@ -140,6 +159,63 @@ public class EventStreamsService {
             // Non-blocking: do not fail the main flow
         }
     }
+
+    /**
+     * Send encoded feature vector to Event Streams for model prediction via IBM ACE.
+     * This method prepares the 41-feature vector with categorical encoding and sends it
+     * to a separate topic for model prediction.
+     */
+    public void sendModelPredictionFeatures(Map<String, Object> rawData) {
+        if (!enabled || baseUrl == null || baseUrl.isBlank()) {
+            return;
+        }
+
+        try {
+            // Use a dedicated topic for model input
+            String modelTopic = "model-features-input";
+            String url = String.format("%s/topics/%s/records", baseUrl, modelTopic);
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            if (username != null && !username.isBlank()) {
+                String basic = Base64.getEncoder().encodeToString((username + ":" + (password != null ? password : "")).getBytes());
+                headers.set("Authorization", "Basic " + basic);
+            }
+
+            // Prepare the 41-feature vector with encoding
+            double[] featureVector = featurePreparationService.prepareFeatureVector(rawData);
+            
+            // Convert feature vector to JSON-serializable format
+            List<Double> features = new java.util.ArrayList<>();
+            for (double val : featureVector) {
+                features.add(val);
+            }
+
+            // Create payload for model prediction
+            Map<String, Object> modelPayload = new LinkedHashMap<>();
+            modelPayload.put("user_id", rawData.get("user_id"));
+            modelPayload.put("session_id", rawData.get("session_id"));
+            modelPayload.put("timestamp", rawData.get("timestamp"));
+            modelPayload.put("features", features);  // 41-element array
+            modelPayload.put("feature_count", features.size());
+            modelPayload.put("note", "41-feature vector for hybrid model (anomaly_category_encoded excluded)");
+
+            Map<String, Object> record = new LinkedHashMap<>();
+            record.put("value", modelPayload);
+
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("records", List.of(record));
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(payload, headers);
+            restTemplate.postForEntity(url, entity, String.class);
+            
+            System.out.println("✅ Sent 41-feature vector for user: " + rawData.get("user_id"));
+            
+        } catch (Exception e) {
+            // Non-blocking: log but don't fail the main flow
+            System.err.println("⚠️  Error sending model features to Event Streams: " + e.getMessage());
+        }
+    }
     
     private Integer calculateIpReputationScore(LoginFeatures login) {
         if (login == null) return null;
@@ -207,6 +283,39 @@ public class EventStreamsService {
             (100 - ipScore) * 0.25 +
             velocity * 0.15
         )));
+    }
+
+    /**
+     * Sends anomaly result to appropriate Event Streams topic
+     */
+    public void sendAnomalyResult(Map<String, Object> result) {
+        if (!enabled || kafkaTemplate == null) {
+            return;
+        }
+        try {
+            int isAnomaly = (int) result.getOrDefault("is_anomaly", -1);
+            String topic = (isAnomaly == 1) ? anomalyTopic : successTopic;
+            String message = mapper.writeValueAsString(result);
+            kafkaTemplate.send(topic, message);
+        } catch (Exception e) {
+            logger.severe("Failed to send anomaly result: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Sends batch predictions to Event Streams
+     */
+    public void sendBatchPredictions(List<Map<String, Object>> predictions) {
+        if (!enabled || kafkaTemplate == null) {
+            return;
+        }
+        try {
+            for (Map<String, Object> prediction : predictions) {
+                sendAnomalyResult(prediction);
+            }
+        } catch (Exception e) {
+            logger.severe("Failed to send batch predictions: " + e.getMessage());
+        }
     }
 }
 
