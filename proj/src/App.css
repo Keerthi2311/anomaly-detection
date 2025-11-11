@@ -1,0 +1,32 @@
+/* Carbon Design System styles are imported via index.scss */
+
+/* App-specific overrides if needed */
+#root {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+/* Enhanced form styling */
+.signup-form-section {
+  transition: box-shadow 0.2s ease;
+}
+
+.signup-form-section:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* Better spacing for form fields */
+.cds--form-item {
+  margin-bottom: 0.75rem;
+}
+
+/* Ensure proper spacing between form sections */
+.cds--tile {
+  margin-bottom: 1rem;
+}
